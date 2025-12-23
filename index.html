@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Jeep Digital Key</title>
+
+<!-- Manifest PWA -->
+<link rel="manifest" href="manifest.json">
+
+<!-- Colore barra Android -->
+<meta name="theme-color" content="#0d0d0d">
+
+<style>
+    body {
+        margin: 0;
+        font-family: "Roboto", sans-serif;
+        background: #0d0d0d;
+        color: #e6e6e6;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 30px 20px;
+        text-align: center;
+    }
+
+    h1 {
+        font-weight: 700;
+        font-size: 28px;
+        letter-spacing: 1px;
+        margin-bottom: 5px;
+        text-transform: uppercase;
+    }
+
+    #status {
+        margin-bottom: 30px;
+        font-size: 16px;
+        opacity: 0.8;
+    }
+
+    .btn {
+        width: 90%;
+        max-width: 340px;
+        padding: 18px;
+        margin: 12px 0;
+        font-size: 18px;
+        font-weight: 600;
+        border: 3px solid #333;
+        border-radius: 12px;
+        cursor: pointer;
+        background: #1a1a1a;
+        color: #e6e6e6;
+        transition: 0.2s;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+
+    .btn:active {
+        transform: scale(0.97);
+    }
+
+    .btn-primary {
+        border-color: #ff6a00;
+        background: #ff6a00;
+        color: #000;
+    }
+
+    .btn-secondary {
+        border-color: #444;
+    }
+
+    .btn-start {
+        border-color: #1f7a1f;
+        background: #1f7a1f;
+        color: #fff;
+    }
+
+    .jeep-grille {
+        width: 120px;
+        margin: 25px auto 35px;
+        opacity: 0.9;
+    }
+</style>
+</head>
+
+<body>
+
+<svg class="jeep-grille" viewBox="0 0 100 40">
+    <rect x="0" y="15" width="100" height="10" fill="#e6e6e6"/>
+    <circle cx="20" cy="20" r="10" fill="#e6e6e6"/>
+    <circle cx="80" cy="20" r="10" fill="#e6e6e6"/>
+</svg>
+
+<h1>Jeep Compass</h1>
+<div id="status">Non connesso</div>
+
+<button class="btn btn-primary" onclick="connectToCar()">Connetti</button>
+<button class="btn btn-secondary" onclick="sendCommand('LOCK')">Blocca</button>
+<button class="btn btn-secondary" onclick="sendCommand('UNLOCK')">Sblocca</button>
+<button class="btn btn-start" onclick="sendCommand('START')">Avvia Motore</button>
+
+<script>
+/* ================================
+   CONFIGURAZIONE BLE
+   ================================ */
+const SERVICE_UUID       = "0000aaaa-0000-1000-8000-00805f9b34fb";
+const CHALLENGE_UUID     = "0000aaab-0000-1000-8000-00805f9b34fb";
+const COMMAND_UUID       = "0000aaac-0000-1000-8000-00805f9b34fb";
+
+/* Chiave segreta (solo esempio!) */
+const SECRET_KEY = "00112233445566778899AABBCCDDEEFF";
+
+/* Stato globale */
+let device, server, service, challengeChar, commandChar;
+
+/* ================================
+   UTILITY
+   ================================ */
+function hexToBytes(hex) {
+    const clean = hex.replace(/[^0-9A-F]/gi, "");
+    const bytes = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < clean.length; i += 2) {
+        bytes[i / 2] = parseInt(clean.substr(i, 2), 16);
+    }
+    return bytes;
+}
+
+async function hmacSHA256(key, data) {
+    const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        key,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+    );
+    return new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, data));
+}
+
+function updateStatus(msg) {
+    document.getElementById("status").innerText = msg;
+}
+
+/* ================================
+   CONNESSIONE BLE
+   ================================ */
+async function connectToCar() {
+    try {
+        updateStatus("Ricerca dispositivo…");
+
+        device = await navigator.bluetooth.requestDevice({
+            filters: [{ services: [SERVICE_UUID] }]
+        });
+
+        updateStatus("Connessione…");
+        server = await device.gatt.connect();
+
+        service = await server.getPrimaryService(SERVICE_UUID);
+        challengeChar = await service.getCharacteristic(CHALLENGE_UUID);
+        commandChar   = await service.getCharacteristic(COMMAND_UUID);
+
+        updateStatus("Connesso e pronto");
+    } catch (err) {
+        updateStatus("Errore: " + err);
+    }
+}
+
+/* ================================
+   INVIO COMANDI
+   ================================ */
+async function sendCommand(type) {
+    if (!challengeChar || !commandChar) {
+        updateStatus("Non connesso");
+        return;
+    }
+
+    try {
+        updateStatus("Lettura challenge…");
+        const challenge = new Uint8Array(await challengeChar.readValue());
+
+        const timestamp = Date.now();
+        const payload = new Uint8Array(1 + 8);
+        payload[0] = type === "LOCK" ? 0x01 :
+                     type === "UNLOCK" ? 0x02 :
+                     type === "START" ? 0x03 : 0x00;
+
+        new DataView(payload.buffer).setBigUint64(1, BigInt(timestamp));
+
+        const keyBytes = hexToBytes(SECRET_KEY);
+        const signature = await hmacSHA256(keyBytes, concat(payload, challenge));
+
+        const finalPacket = concat(payload, signature);
+
+        updateStatus("Invio comando…");
+        await commandChar.writeValue(finalPacket);
+
+        updateStatus("Comando inviato");
+    } catch (err) {
+        updateStatus("Errore: " + err);
+    }
+}
+
+function concat(a, b) {
+    const c = new Uint8Array(a.length + b.length);
+    c.set(a, 0);
+    c.set(b, a.length);
+    return c;
+}
+
+/* ================================
+   REGISTRA SERVICE WORKER
+   ================================ */
+if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("service-worker.js");
+}
+</script>
+
+</body>
+</html>
